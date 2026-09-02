@@ -59,9 +59,9 @@ natively) once a post is approved. The app only ever writes a placeholder
 `VideoLink` field in Airtable if you want to paste a link to the file
 yourself for reference.
 
-**Optional — Telegram deal curation:** if you connect your Telegram deals
-channel (section 9), every deal your channel posts gets logged automatically,
-and reacting to one with 🔥 turns it straight into draft posts written from
+**Optional — Telegram deal curation:** if you connect a dedicated bot
+(section 9), forwarding a deal from your existing deal bot to it turns it
+straight into draft posts written from
 that deal's *real* price/retailer/link — no AI-invented numbers. A public,
 read-only endpoint also lets your actual website show a live "Latest Deals"
 widget pulling from the same curated list. Both are entirely optional and
@@ -315,14 +315,16 @@ deal-radar-app/
 
 ## 9. Optional: Telegram deal curation + website widget
 
-This connects your existing Telegram deals channel to the app: every deal
-posted there gets logged automatically, and reacting to one with 🔥 turns it
-into draft posts written from that deal's real facts (never AI-invented
-prices). A public endpoint also lets your actual website (built separately,
-e.g. on GoDaddy Airo) show a live "Latest Deals" widget pulling from
-whatever you've curated this way.
+Your real deals arrive as a **private chat with your existing deal-finding
+bot**, not a channel — so this app's own bot can't sit in as an admin and
+watch passively (Telegram doesn't let one bot see another bot's private
+chat with you). Instead: you **forward** a deal worth posting to this app's
+own bot. That forward is the trigger — it writes draft posts from that
+deal's real facts (never AI-invented prices) and saves them to your
+dashboard. A public endpoint also lets your actual website show a live
+"Latest Deals" widget pulling from whatever you've curated this way.
 
-**Skip this whole section if you don't need it** — leave the four
+**Skip this whole section if you don't need it** — leave the three
 `TELEGRAM_*` variables blank and nothing about the rest of the app changes.
 
 This feature **only works once the app is deployed and live** (section 6) —
@@ -332,29 +334,21 @@ local-development version of this one.
 ### 9a. Create a dedicated Telegram bot
 
 Use a brand-new bot for this, separate from your existing deal-finding bot —
-a single Telegram bot can only receive updates one way at a time, and your
-existing bot is presumably already busy watching retailers. Adding a second
-bot avoids any risk of breaking it.
+they're independent, so nothing about your existing one risks breaking.
 
 1. In Telegram, message **[@BotFather](https://t.me/BotFather)** and send
    `/newbot`. Give it a name (e.g. "Deal Radar UK Curator") and a username
    ending in `bot` (e.g. `dealradaruk_curator_bot`).
 2. BotFather replies with a token like `123456789:AAH...` — this is
    `TELEGRAM_BOT_TOKEN`.
-3. Open your existing deals channel → **Administrators** → **Add Admin** →
-   search for the new bot's username → add it. It only needs to be an admin
-   to receive channel posts/reactions — no special permissions required.
-4. Get your channel's ID for `TELEGRAM_CHANNEL_ID`: the easiest way is to
-   forward any message from the channel to
-   **[@userinfobot](https://t.me/userinfobot)** or
-   **[@JsonDumpBot](https://t.me/JsonDumpBot)**, which will show you a
-   number like `-1001234567890` (channel IDs are negative) — copy that
-   exactly, including the minus sign.
-5. Pick your own `TELEGRAM_WEBHOOK_SECRET` — any random string (e.g. mash
+3. Get your own numeric Telegram user ID for `TELEGRAM_ALLOWED_USER_ID` —
+   this is what stops anyone else who finds the bot's username from
+   triggering it. Message **[@userinfobot](https://t.me/userinfobot)** and
+   it'll reply with your ID (a plain number, e.g. `123456789` — no minus
+   sign, unlike a channel ID).
+4. Pick your own `TELEGRAM_WEBHOOK_SECRET` — any random string (e.g. mash
    the keyboard for 20+ characters). This is what stops a stranger from
    sending fake updates straight to the webhook URL.
-6. Leave `TELEGRAM_TRIGGER_EMOJI` as `🔥`, or change it to any single emoji
-   you'd rather react with.
 
 ### 9b. Add the "Deals" table in Airtable
 
@@ -382,7 +376,7 @@ needed there.
 
 ### 9c. Add the environment variables and deploy
 
-Add all four `TELEGRAM_*` values from 9a to both `.env.local` and your
+Add all three `TELEGRAM_*` values from 9a to both `.env.local` and your
 Vercel project's Environment Variables (same as every other key — see
 section 6), then deploy/redeploy so they take effect.
 
@@ -393,13 +387,12 @@ URL in your browser once (replace the three placeholders with your actual
 values):
 
 ```
-https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<your-app>.vercel.app/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>&allowed_updates=%5B%22channel_post%22%2C%22message_reaction%22%5D
+https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<your-app>.vercel.app/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>&allowed_updates=%5B%22message%22%5D
 ```
 
 A reply of `{"ok":true,"result":true,...}` means it's set up. From now on,
-every deal your channel posts gets logged, and reacting with 🔥 turns it
-into draft posts on the dashboard — watch for the bot's confirmation reply
-under the message.
+forwarding a deal to the bot turns it into draft posts on the dashboard —
+watch for its confirmation reply under the forwarded message.
 
 If you ever want to check or clear it:
 

@@ -1,25 +1,28 @@
 // POST /api/telegram/webhook
 //
-// Telegram calls this directly whenever something happens in the deals
-// channel — a new deal is posted, or someone reacts to one. It deliberately
-// bypasses Basic Auth (see middleware.ts) since Telegram can't present a
-// username/password; instead it's secured by a secret token Telegram sends
-// with every request (set up in README, checked below).
+// Telegram calls this directly whenever you message (or forward something
+// to) this app's Telegram bot. It deliberately bypasses Basic Auth (see
+// middleware.ts) since Telegram can't present a username/password; instead
+// it's secured by a secret token Telegram sends with every request (set up
+// in README, checked below).
 //
-// Two things this route cares about:
-//  1. A new channel post in the deal bot's known format -> log it in the
-//     "Deals" Airtable table as "new". Nothing else happens yet.
-//  2. Someone reacting with the trigger emoji (default 🔥) to a deal we've
-//     logged -> write real posts about that exact deal (OpenAI, using the
-//     deal's real facts) and save them to "Posts" as drafts, then flip the
-//     deal to "posted" so the same reaction can't double-process it.
+// Your real deals arrive as a PRIVATE chat with your existing deal-finding
+// bot — not a channel — so there's no way for this app's bot to sit in and
+// watch passively (Telegram doesn't let one bot see another bot's private
+// chat with you). Instead: you forward a deal worth posting to THIS bot.
+// That forward itself is the trigger — no separate reaction step. On
+// receiving one, this route: parses the deal's real facts, writes an
+// Instagram + TikTok post pair about it (OpenAI, using those real facts —
+// never invented), saves them to "Posts" as drafts, logs the deal as
+// "posted" (so it shows on the public website widget), and replies
+// confirming what happened.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createDeal, createPosts, findDealByTelegramMessage, updateDealStatus } from "@/lib/airtable";
 import { generatePostsFromDeal } from "@/lib/openai";
 import {
   describeDeal,
-  isTriggerReaction,
+  isAllowedSender,
   isValidTelegramRequest,
   largestPhoto,
   parseDealMessage,
@@ -27,11 +30,6 @@ import {
   sendTelegramReply,
   type TelegramUpdate,
 } from "@/lib/telegram";
-
-function isFromConfiguredChannel(chatId: number): boolean {
-  const configured = process.env.TELEGRAM_CHANNEL_ID;
-  return Boolean(configured) && String(chatId) === configured;
-}
 
 export async function POST(req: NextRequest) {
   // Telegram retries on anything other than a fast 2xx, so every path below
@@ -51,10 +49,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    if (update.channel_post) {
-      await handleChannelPost(update.channel_post);
-    } else if (update.message_reaction) {
-      await handleReaction(update.message_reaction);
+    if (update.message) {
+      await handleMessage(update.message);
     }
   } catch (err) {
     // Log server-side (visible in Vercel's function logs) but still
@@ -66,39 +62,41 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-async function handleChannelPost(message: NonNullable<TelegramUpdate["channel_post"]>) {
-  if (!isFromConfiguredChannel(message.chat.id)) return;
-
-  const parsed = parseDealMessage(message.caption ?? message.text);
-  if (!parsed) return; // not a deal post in the expected format — ignore.
+async function handleMessage(message: NonNullable<TelegramUpdate["message"]>) {
+  // Only you should ever be able to trigger this — anyone else who finds
+  // the bot and messages it is silently ignored (no reply at all), so a
+  // stranger poking at the bot doesn't burn OpenAI credits or get any
+  // confirmation that it does something.
+  if (!isAllowedSender(message.from?.id)) return;
 
   const chatId = String(message.chat.id);
   const messageId = String(message.message_id);
 
+  const parsed = parseDealMessage(message.caption ?? message.text);
+  if (!parsed) {
+    // From you, but doesn't look like a forwarded deal — a short nudge is
+    // more useful here than silence, since you're the one person this
+    // could actually help.
+    await sendTelegramReply(
+      chatId,
+      messageId,
+      "Forward me a deal from your deal-finding bot and I'll turn it into draft posts."
+    ).catch((err) => console.error("[handleMessage] nudge reply failed", err));
+    return;
+  }
+
   const existing = await findDealByTelegramMessage(chatId, messageId);
-  if (existing) return; // already logged (Telegram can redeliver updates).
+  if (existing) return; // already processed (Telegram can redeliver updates).
 
   const photo = largestPhoto(message);
   const photoUrl = photo ? await resolveTelegramFileUrl(photo.file_id).catch(() => undefined) : undefined;
 
-  await createDeal({
+  const deal = await createDeal({
     ...parsed,
     photoUrl,
     telegramChatId: chatId,
     telegramMessageId: messageId,
   });
-}
-
-async function handleReaction(reaction: NonNullable<TelegramUpdate["message_reaction"]>) {
-  if (!isFromConfiguredChannel(reaction.chat.id)) return;
-  if (!isTriggerReaction(reaction)) return;
-
-  const chatId = String(reaction.chat.id);
-  const messageId = String(reaction.message_id);
-
-  const deal = await findDealByTelegramMessage(chatId, messageId);
-  if (!deal) return; // reaction on a message we never logged as a deal.
-  if (deal.status !== "new") return; // already posted or ignored — don't redo it.
 
   const generated = await generatePostsFromDeal(deal);
   await createPosts(generated);
@@ -108,5 +106,5 @@ async function handleReaction(reaction: NonNullable<TelegramUpdate["message_reac
     chatId,
     messageId,
     `✅ Added "${describeDeal(deal)}" to the Deal Radar UK dashboard as ${generated.length} draft post(s). Review and approve them there.`
-  ).catch((err) => console.error("[handleReaction] confirmation reply failed", err));
+  ).catch((err) => console.error("[handleMessage] confirmation reply failed", err));
 }

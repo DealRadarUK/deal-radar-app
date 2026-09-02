@@ -5,6 +5,13 @@
 // only ever needs to (a) receive webhook updates and (b) send a handful of
 // confirmation messages, which is a handful of simple HTTP calls.
 //
+// How this actually gets used: your real deals arrive as a PRIVATE chat
+// with your existing deal-finding bot, not a channel — so this app's own
+// bot can't sit in as an admin and watch passively (Telegram doesn't let
+// one bot see another bot's private chat with you). Instead, you forward
+// a deal worth posting to THIS bot directly. Forwarding it is the trigger —
+// there's no separate reaction step. See app/api/telegram/webhook/route.ts.
+//
 // Telegram Bot API docs: https://core.telegram.org/bots/api
 
 import type { Deal } from "./types";
@@ -12,7 +19,7 @@ import type { Deal } from "./types";
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 export function isTelegramConfigured(): boolean {
-  return Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHANNEL_ID);
+  return Boolean(process.env.TELEGRAM_BOT_TOKEN);
 }
 
 function getBotToken(): string {
@@ -23,24 +30,30 @@ function getBotToken(): string {
   return token;
 }
 
-/** The emoji reaction that means "turn this deal into a post". Defaults to
- * 🔥 but can be changed per-deployment without touching code. */
-export function getTriggerEmoji(): string {
-  return process.env.TELEGRAM_TRIGGER_EMOJI || "🔥";
-}
-
 /** Verifies the `X-Telegram-Bot-Api-Secret-Token` header Telegram sends on
  * every webhook request when a secret_token was set on setWebhook (see
- * scripts/setup-telegram-webhook.md). This is what stops a stranger from
- * POSTing fake "approve this deal" updates straight at the endpoint,
- * bypassing Basic Auth (which the webhook intentionally skips — Telegram
- * can't present a username/password). If no secret is configured, this
- * fails closed (rejects) rather than silently accepting unauthenticated
- * requests — same philosophy as the Basic Auth check in middleware.ts. */
+ * README section 9). This is what stops a stranger from POSTing fake
+ * updates straight at the endpoint, bypassing Basic Auth (which the webhook
+ * intentionally skips — Telegram can't present a username/password). If no
+ * secret is configured, this fails closed (rejects) rather than silently
+ * accepting unauthenticated requests — same philosophy as the Basic Auth
+ * check in middleware.ts. */
 export function isValidTelegramRequest(headerValue: string | null): boolean {
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
   if (!secret) return false;
   return headerValue === secret;
+}
+
+/** Only messages from YOU should ever trigger post generation — otherwise
+ * anyone who finds the bot's username could DM it and burn through your
+ * OpenAI credits. Get your own numeric Telegram user ID by messaging
+ * @userinfobot once (see README section 9), then set
+ * TELEGRAM_ALLOWED_USER_ID to it. If unset, every message is rejected
+ * (fails closed) rather than silently accepting anyone. */
+export function isAllowedSender(userId: number | undefined): boolean {
+  const allowed = process.env.TELEGRAM_ALLOWED_USER_ID;
+  if (!allowed || !userId) return false;
+  return String(userId) === allowed;
 }
 
 async function telegramFetch(method: string, body?: Record<string, unknown>) {
@@ -56,8 +69,8 @@ async function telegramFetch(method: string, body?: Record<string, unknown>) {
   return data.result;
 }
 
-/** Reply in the channel, threaded under the original deal message, so it's
- * obvious which deal the confirmation is about. */
+/** Reply in the same private chat, threaded under the forwarded message, so
+ * it's obvious which deal the confirmation is about. */
 export async function sendTelegramReply(chatId: string, replyToMessageId: string, text: string) {
   await telegramFetch("sendMessage", {
     chat_id: chatId,
@@ -71,7 +84,7 @@ export async function sendTelegramReply(chatId: string, replyToMessageId: string
  * temporary download URL. Telegram file URLs expire after a while, which is
  * fine for our use — we only need the URL long enough to hand it to
  * Airtable, which fetches and stores its own copy of the image (Airtable
- * attachment fields work this way: give them a URL once, they host it). */
+ * attachment/URL fields work this way: give them a URL once). */
 export async function resolveTelegramFileUrl(fileId: string): Promise<string> {
   const file = await telegramFetch("getFile", { file_id: fileId });
   return `${TELEGRAM_API_BASE}/file/bot${getBotToken()}/${file.file_path}`;
@@ -79,7 +92,7 @@ export async function resolveTelegramFileUrl(fileId: string): Promise<string> {
 
 // --- Parsing the deal bot's message format ---------------------------------
 //
-// Messages from the existing deal-monitoring bot look like:
+// Messages from your existing deal-monitoring bot look like:
 //
 //   NEW SALE ITEM
 //   Item name
@@ -91,9 +104,12 @@ export async function resolveTelegramFileUrl(fileId: string): Promise<string> {
 //   Link to product
 //
 // ...sent as a photo with that text as the caption (the photo itself is the
-// "Product Photo" field, not a text line). If your bot's exact wording
-// differs even slightly, adjust FIRST_LINE_MARKER and the field order below
-// to match — everything downstream just reads from the parsed object.
+// "Product Photo" field, not a text line). Forwarding one to this app's bot
+// carries the same caption + photo across unchanged, so the exact same
+// parser works whether the text was typed or forwarded. If your bot's exact
+// wording differs even slightly, adjust FIRST_LINE_MARKER and the field
+// order below to match — everything downstream just reads from the parsed
+// object.
 
 const FIRST_LINE_MARKER = /^NEW SALE ITEM$/i;
 
@@ -108,8 +124,8 @@ export interface ParsedDealMessage {
 }
 
 /** Returns null (rather than throwing) for any message that isn't a deal
- * post in the expected shape — the channel may well contain other message
- * types (announcements, replies, etc.) that we should just ignore. */
+ * post in the expected shape — you might forward or send the bot other
+ * things, intentionally or by mistake. */
 export function parseDealMessage(caption: string | undefined): ParsedDealMessage | null {
   if (!caption) return null;
 
@@ -132,36 +148,23 @@ export function parseDealMessage(caption: string | undefined): ParsedDealMessage
 // https://core.telegram.org/bots/api#update for the complete reference.)
 
 export interface TelegramUpdate {
-  channel_post?: TelegramMessage;
-  message_reaction?: TelegramMessageReaction;
+  message?: TelegramMessage;
 }
 
 export interface TelegramMessage {
   message_id: number;
   chat: { id: number };
+  from?: { id: number };
   caption?: string;
   text?: string;
   photo?: { file_id: string; file_size?: number }[];
 }
 
-export interface TelegramMessageReaction {
-  chat: { id: number };
-  message_id: number;
-  new_reaction: { type: string; emoji?: string }[];
-}
-
 /** Telegram sends photo sizes smallest-first — the last entry is the
- * largest available, which is what we want for the website widget. */
+ * largest available, which is what we want. */
 export function largestPhoto(message: TelegramMessage): { file_id: string } | null {
   if (!message.photo || message.photo.length === 0) return null;
   return message.photo[message.photo.length - 1];
-}
-
-/** True if this reaction update is someone adding (not removing) the
- * configured trigger emoji. */
-export function isTriggerReaction(reaction: TelegramMessageReaction): boolean {
-  const trigger = getTriggerEmoji();
-  return reaction.new_reaction.some((r) => r.type === "emoji" && r.emoji === trigger);
 }
 
 /** Builds a short human-readable summary of a Deal, used in Telegram
