@@ -30,6 +30,17 @@ function getClient(): OpenAI {
 
 const VALID_PLATFORMS: Platform[] = ["Instagram", "TikTok", "X", "Threads"];
 
+/** Belt-and-braces backstop for the "never use em dashes" rule in
+ * BRAND_VOICE_SYSTEM_PROMPT — models occasionally ignore a style
+ * instruction, and an em dash slipping into a caption is one of the more
+ * obvious "written by AI" tells, so this catches it even if the prompt
+ * doesn't. Runs on the raw JSON text before parsing, which is safe since an
+ * em dash never has structural meaning in JSON — it only ever appears
+ * inside string content. */
+function stripEmDashes(text: string): string {
+  return text.replace(/—/g, "-");
+}
+
 interface ValidationResult {
   post: GeneratedPost | null;
   reason?: string; // set when post is null — why this one was skipped
@@ -124,8 +135,9 @@ export async function generateWeekPlan(opts: {
     ],
   });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw) throw new Error("OpenAI returned an empty response for generateWeekPlan.");
+  const rawContent = completion.choices[0]?.message?.content;
+  if (!rawContent) throw new Error("OpenAI returned an empty response for generateWeekPlan.");
+  const raw = stripEmDashes(rawContent);
 
   let parsed: { posts?: unknown[] };
   try {
@@ -173,8 +185,9 @@ export async function generatePostsFromDeal(deal: Deal): Promise<GeneratedPost[]
     ],
   });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw) throw new Error("OpenAI returned an empty response for generatePostsFromDeal.");
+  const rawContent = completion.choices[0]?.message?.content;
+  if (!rawContent) throw new Error("OpenAI returned an empty response for generatePostsFromDeal.");
+  const raw = stripEmDashes(rawContent);
 
   let parsed: { posts?: unknown[] };
   try {
@@ -237,8 +250,9 @@ export async function generateWeeklyReport(opts: {
     ],
   });
 
-  const raw = completion.choices[0]?.message?.content;
-  if (!raw) throw new Error("OpenAI returned an empty response for generateWeeklyReport.");
+  const rawContent = completion.choices[0]?.message?.content;
+  if (!rawContent) throw new Error("OpenAI returned an empty response for generateWeeklyReport.");
+  const raw = stripEmDashes(rawContent);
 
   try {
     const parsed = JSON.parse(raw);
