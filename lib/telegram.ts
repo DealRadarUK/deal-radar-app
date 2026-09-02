@@ -90,28 +90,62 @@ export async function resolveTelegramFileUrl(fileId: string): Promise<string> {
   return `${TELEGRAM_API_BASE}/file/bot${getBotToken()}/${file.file_path}`;
 }
 
+/** Many deal messages arrive as plain text with a product link and no
+ * attached photo — the "photo" you see in Telegram is just its own link
+ * preview of that URL, which this bot never receives as a real photo. As a
+ * fallback, we fetch the product page ourselves and read its Open Graph
+ * image tag, so deals still get a real product photo. Best-effort: returns
+ * undefined on any failure (blocked fetch, no og:image tag, timeout, etc.)
+ * rather than throwing — a missing photo should never stop a deal from
+ * being saved. */
+export async function fetchOgImageUrl(pageUrl: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(pageUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; DealRadarUKBot/1.0)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return undefined;
+    const html = await res.text();
+    const match =
+      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ??
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 // --- Parsing the deal bot's message format ---------------------------------
 //
-// Messages from your existing deal-monitoring bot look like:
+// Real messages from your deal-monitoring bot look like this (a "PRICE
+// DROP" example, confirmed against a live message):
 //
-//   NEW SALE ITEM
-//   Item name
-//   Retailer
-//   Price
-//   RRP
-//   Percentage below RRP
-//   Sizes available
-//   Link to product
+//   PRICE DROP
+//   Plain Collared Overcoat
+//   BoohooMAN
+//   Secret Sales
+//   £40.00 → £30.00
+//   25.0% price drop
+//   Previous lowest: £30.00
+//   Sizes: L, M, S, XL, XS
+//   https://www.secretsales.com/...
 //
-// ...sent as a photo with that text as the caption (the photo itself is the
-// "Product Photo" field, not a text line). Forwarding one to this app's bot
-// carries the same caption + photo across unchanged, so the exact same
-// parser works whether the text was typed or forwarded. If your bot's exact
-// wording differs even slightly, adjust FIRST_LINE_MARKER and the field
-// order below to match — everything downstream just reads from the parsed
-// object.
+// ...as plain text (no attached photo — Telegram renders its own preview of
+// the link, which isn't a real photo this bot can read). The parser below
+// deliberately doesn't rely on fixed line positions beyond the item name
+// and retailer (line 2 and 3, right after the header) — everything else
+// (price/RRP, % off, sizes, link) is found by pattern anywhere in the
+// message. That way it copes with extra lines you haven't described to me
+// (like "Secret Sales" or "Previous lowest" above) without breaking, and
+// should keep working even if the header wording varies (e.g. "NEW SALE
+// ITEM" for a brand-new item vs "PRICE DROP" for a price cut) — any short,
+// ALL-CAPS first line is accepted as a header and skipped.
 
-const FIRST_LINE_MARKER = /^NEW SALE ITEM$/i;
+const KNOWN_HEADERS = /^(NEW SALE ITEM|PRICE DROP|NEW DEAL|SALE ITEM|BACK IN STOCK|DEAL ALERT)$/i;
+/** Fallback for header wordings we haven't seen yet: a short, mostly-caps
+ * first line (allowing letters, numbers, spaces, and punctuation) is
+ * assumed to be a header and skipped, same as a known one. */
+const LOOKS_LIKE_HEADER = /^[A-Z0-9][A-Z0-9 !%\-]{2,29}$/;
 
 export interface ParsedDealMessage {
   itemName: string;
@@ -126,19 +160,47 @@ export interface ParsedDealMessage {
 /** Returns null (rather than throwing) for any message that isn't a deal
  * post in the expected shape — you might forward or send the bot other
  * things, intentionally or by mistake. */
-export function parseDealMessage(caption: string | undefined): ParsedDealMessage | null {
-  if (!caption) return null;
+export function parseDealMessage(text: string | undefined): ParsedDealMessage | null {
+  if (!text) return null;
 
-  const lines = caption
+  const lines = text
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  if (lines.length < 8 || !FIRST_LINE_MARKER.test(lines[0])) return null;
+  if (lines.length < 4) return null;
 
-  const [, itemName, retailer, price, rrp, percentOff, sizesAvailable, productLink] = lines;
+  const hasHeader = KNOWN_HEADERS.test(lines[0]) || LOOKS_LIKE_HEADER.test(lines[0]);
+  const body = hasHeader ? lines.slice(1) : lines;
+  if (body.length < 3) return null;
 
-  if (!itemName || !retailer || !price) return null;
+  const itemName = body[0];
+  const retailer = body[1];
+
+  // Price/RRP: prefer an explicit "£X → £Y" (was/now) line — anything else
+  // containing a lone £ amount (e.g. "Previous lowest: £30.00") is ignored
+  // rather than mistaken for the deal price.
+  let price = "";
+  let rrp = "";
+  const arrowMatch = text.match(/£\s?([\d.,]+)\s*(?:→|->|to)\s*£\s?([\d.,]+)/i);
+  if (arrowMatch) {
+    rrp = `£${arrowMatch[1]}`;
+    price = `£${arrowMatch[2]}`;
+  } else {
+    const singleMatch = text.match(/£\s?[\d.,]+/);
+    if (singleMatch) price = singleMatch[0];
+  }
+
+  const percentMatch = text.match(/(\d+(?:\.\d+)?)\s*%/);
+  const percentOff = percentMatch ? `${percentMatch[1]}%` : "";
+
+  const sizesMatch = text.match(/sizes?:\s*(.+)/i);
+  const sizesAvailable = sizesMatch ? sizesMatch[1].trim() : "";
+
+  const urlMatch = text.match(/https?:\/\/\S+/i);
+  const productLink = urlMatch ? urlMatch[0] : "";
+
+  if (!itemName || !retailer || !price || !productLink) return null;
 
   return { itemName, retailer, price, rrp, percentOff, sizesAvailable, productLink };
 }

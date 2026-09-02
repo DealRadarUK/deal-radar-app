@@ -22,6 +22,7 @@ import { createDeal, createPosts, findDealByTelegramMessage, updateDealStatus } 
 import { generatePostsFromDeal } from "@/lib/openai";
 import {
   describeDeal,
+  fetchOgImageUrl,
   isAllowedSender,
   isValidTelegramRequest,
   largestPhoto,
@@ -88,8 +89,14 @@ async function handleMessage(message: NonNullable<TelegramUpdate["message"]>) {
   const existing = await findDealByTelegramMessage(chatId, messageId);
   if (existing) return; // already processed (Telegram can redeliver updates).
 
+  // Most deal messages are plain text with a link (Telegram's own link
+  // preview isn't a real attached photo we can read) — fall back to
+  // fetching the product page's Open Graph image so the deal still gets a
+  // real photo.
   const photo = largestPhoto(message);
-  const photoUrl = photo ? await resolveTelegramFileUrl(photo.file_id).catch(() => undefined) : undefined;
+  const photoUrl = photo
+    ? await resolveTelegramFileUrl(photo.file_id).catch(() => undefined)
+    : await fetchOgImageUrl(parsed.productLink).catch(() => undefined);
 
   const deal = await createDeal({
     ...parsed,
