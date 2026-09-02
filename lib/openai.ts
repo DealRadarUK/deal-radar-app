@@ -35,6 +35,8 @@ interface ValidationResult {
   reason?: string; // set when post is null — why this one was skipped
 }
 
+const CORE_POST_FIELDS = ["platform", "format", "topic", "hook", "script", "caption", "hashtags"] as const;
+
 // Returns { post: null, reason } (instead of throwing) for a malformed post,
 // so one bad post in the batch doesn't take down the whole week's
 // generation — OpenAI's "json_object" mode encourages valid JSON but
@@ -42,9 +44,16 @@ interface ValidationResult {
 // misses are expected and should be skipped, not fatal. The reason is kept
 // (not just logged) so that if EVERY post in a batch fails, the error the
 // founder actually sees says why, instead of a bare "no usable posts".
-function validateGeneratedPost(raw: unknown): ValidationResult {
+//
+// requireDate controls whether "publishDateTime" is required from the
+// model: generateWeekPlan needs the model to pick sensible dates spread
+// across a real week, but generatePostsFromDeal assigns dates itself (see
+// below) — for that case a raw item is only judged on the core content
+// fields, so a model that also (harmlessly) includes an extra
+// publishDateTime field doesn't get penalised for it either way.
+function validateGeneratedPost(raw: unknown, requireDate: boolean): ValidationResult {
   const p = raw as Record<string, unknown>;
-  const required = ["platform", "format", "topic", "hook", "script", "caption", "hashtags", "publishDateTime"];
+  const required: readonly string[] = requireDate ? [...CORE_POST_FIELDS, "publishDateTime"] : CORE_POST_FIELDS;
   for (const key of required) {
     if (typeof p[key] !== "string" || (p[key] as string).trim() === "") {
       return { post: null, reason: `missing/invalid "${key}"` };
@@ -53,8 +62,8 @@ function validateGeneratedPost(raw: unknown): ValidationResult {
   if (!VALID_PLATFORMS.includes(p.platform as Platform)) {
     return { post: null, reason: `unexpected platform "${p.platform}"` };
   }
-  // publishDateTime must parse to a real date.
-  if (Number.isNaN(Date.parse(p.publishDateTime as string))) {
+  // When required, publishDateTime must parse to a real date.
+  if (requireDate && Number.isNaN(Date.parse(p.publishDateTime as string))) {
     return { post: null, reason: `unparseable publishDateTime "${p.publishDateTime}"` };
   }
   return { post: p as unknown as GeneratedPost };
@@ -63,12 +72,12 @@ function validateGeneratedPost(raw: unknown): ValidationResult {
 /** Runs validateGeneratedPost over a raw "posts" array, logs every skip
  * (visible in Vercel's function logs), and throws a descriptive error
  * (rather than a generic one) if nothing usable came out of the batch. */
-function validateAndFilter(rawPosts: unknown[], context: string): GeneratedPost[] {
+function validateAndFilter(rawPosts: unknown[], context: string, requireDate = true): GeneratedPost[] {
   const valid: GeneratedPost[] = [];
   const reasons: string[] = [];
 
   for (const raw of rawPosts) {
-    const { post, reason } = validateGeneratedPost(raw);
+    const { post, reason } = validateGeneratedPost(raw, requireDate);
     if (post) {
       valid.push(post);
     } else if (reason) {
@@ -178,7 +187,19 @@ export async function generatePostsFromDeal(deal: Deal): Promise<GeneratedPost[]
     throw new Error(`OpenAI response had no "posts" array: ${raw.slice(0, 500)}`);
   }
 
-  return validateAndFilter(parsed.posts, "generatePostsFromDeal");
+  const posts = validateAndFilter(parsed.posts, "generatePostsFromDeal", /* requireDate */ false);
+
+  // Assign publish times ourselves rather than relying on the model to
+  // supply them — a deal-triggered post just needs to go out soon and
+  // staggered, not scheduled across a real week, and this sidesteps any
+  // risk of the model splitting dates into their own malformed array
+  // entries (as happened before this was made model-independent).
+  const now = Date.now();
+  const STAGGER_HOURS = [3, 7, 12, 18, 24, 30]; // covers more posts than we ever ask for in one go
+  return posts.map((post, i) => ({
+    ...post,
+    publishDateTime: new Date(now + (STAGGER_HOURS[i] ?? (i + 1) * 4) * 60 * 60 * 1000).toISOString(),
+  }));
 }
 
 export interface ReportResult {

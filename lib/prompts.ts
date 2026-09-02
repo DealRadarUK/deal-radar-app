@@ -65,7 +65,7 @@ export function buildPostFromDealPrompt(opts: {
   productLink: string;
   nowISO: string;
 }): string {
-  const { itemName, retailer, price, rrp, percentOff, sizesAvailable, productLink, nowISO } = opts;
+  const { itemName, retailer, price, rrp, percentOff, sizesAvailable, productLink } = opts;
 
   return `Write social posts for ONE specific, real, already-verified deal for Deal Radar UK — do not invent or alter any of the facts below, use them exactly as given:
 
@@ -87,10 +87,11 @@ For EACH of the 2 posts, provide all of:
 - script: a numbered shot list (5-8 short beats: what's on screen + voiceover/text each beat), built around the real price/discount/sizes above.
 - caption: 2-4 sentences in the Deal Radar UK voice, ending with a clear CTA. Include relevant emoji sparingly (0-2), not decoratively. Reference the real price and % off.
 - hashtags: exactly 8-12 hashtags as a single space-separated string, mixing brand (#dealradaruk), niche, and deal-specific tags relevant to this item/retailer.
-- publishDateTime: an ISO 8601 datetime within the next 48 hours from ${nowISO}, at a sensible time for that platform (Reels/TikTok best around 12:00-14:00 or 18:00-21:00 UK time). Stagger the two posts' times rather than stacking them.
+
+Do NOT include a publishDateTime field — scheduling for these is handled separately, outside this response.
 
 Return ONLY valid JSON matching this exact shape (no markdown fences, no commentary):
-{ "posts": [ { "platform": "...", "format": "...", "topic": "...", "hook": "...", "script": "...", "caption": "...", "hashtags": "...", "publishDateTime": "..." }, ... exactly 2 ] }`;
+{ "posts": [ { "platform": "...", "format": "...", "topic": "...", "hook": "...", "script": "...", "caption": "...", "hashtags": "..." }, ... exactly 2 ] }`;
 }
 
 export function buildWeeklyReportPrompt(opts: {
