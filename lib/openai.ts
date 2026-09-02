@@ -30,30 +30,63 @@ function getClient(): OpenAI {
 
 const VALID_PLATFORMS: Platform[] = ["Instagram", "TikTok", "X", "Threads"];
 
-// Returns null (instead of throwing) for a malformed post, so one bad post
-// in the batch doesn't take down the whole week's generation — OpenAI's
-// "json_object" mode encourages valid JSON but doesn't guarantee every
-// field is present on every element, so occasional misses are expected
-// and should be skipped, not fatal.
-function validateGeneratedPost(raw: unknown): GeneratedPost | null {
+interface ValidationResult {
+  post: GeneratedPost | null;
+  reason?: string; // set when post is null — why this one was skipped
+}
+
+// Returns { post: null, reason } (instead of throwing) for a malformed post,
+// so one bad post in the batch doesn't take down the whole week's
+// generation — OpenAI's "json_object" mode encourages valid JSON but
+// doesn't guarantee every field is present on every element, so occasional
+// misses are expected and should be skipped, not fatal. The reason is kept
+// (not just logged) so that if EVERY post in a batch fails, the error the
+// founder actually sees says why, instead of a bare "no usable posts".
+function validateGeneratedPost(raw: unknown): ValidationResult {
   const p = raw as Record<string, unknown>;
   const required = ["platform", "format", "topic", "hook", "script", "caption", "hashtags", "publishDateTime"];
   for (const key of required) {
     if (typeof p[key] !== "string" || (p[key] as string).trim() === "") {
-      console.warn(`Skipping a generated post — missing/invalid "${key}":`, raw);
-      return null;
+      return { post: null, reason: `missing/invalid "${key}"` };
     }
   }
   if (!VALID_PLATFORMS.includes(p.platform as Platform)) {
-    console.warn(`Skipping a generated post — unexpected platform "${p.platform}":`, raw);
-    return null;
+    return { post: null, reason: `unexpected platform "${p.platform}"` };
   }
   // publishDateTime must parse to a real date.
   if (Number.isNaN(Date.parse(p.publishDateTime as string))) {
-    console.warn(`Skipping a generated post — unparseable publishDateTime "${p.publishDateTime}":`, raw);
-    return null;
+    return { post: null, reason: `unparseable publishDateTime "${p.publishDateTime}"` };
   }
-  return p as unknown as GeneratedPost;
+  return { post: p as unknown as GeneratedPost };
+}
+
+/** Runs validateGeneratedPost over a raw "posts" array, logs every skip
+ * (visible in Vercel's function logs), and throws a descriptive error
+ * (rather than a generic one) if nothing usable came out of the batch. */
+function validateAndFilter(rawPosts: unknown[], context: string): GeneratedPost[] {
+  const valid: GeneratedPost[] = [];
+  const reasons: string[] = [];
+
+  for (const raw of rawPosts) {
+    const { post, reason } = validateGeneratedPost(raw);
+    if (post) {
+      valid.push(post);
+    } else if (reason) {
+      console.warn(`[${context}] Skipping a generated post — ${reason}:`, raw);
+      reasons.push(reason);
+    }
+  }
+
+  if (valid.length === 0) {
+    const uniqueReasons = Array.from(new Set(reasons)).slice(0, 3).join("; ");
+    throw new Error(
+      `OpenAI returned ${rawPosts.length} post(s) but none were usable (${uniqueReasons || "unknown reason"}). ` +
+        `Try again — this is usually a one-off. If it keeps happening, it may mean the model changed its ` +
+        `response shape and lib/prompts.ts needs a tweak.`
+    );
+  }
+
+  return valid;
 }
 
 /**
@@ -96,13 +129,7 @@ export async function generateWeekPlan(opts: {
     throw new Error(`OpenAI response had no "posts" array: ${raw.slice(0, 500)}`);
   }
 
-  const validated = parsed.posts.map(validateGeneratedPost).filter((p): p is GeneratedPost => p !== null);
-
-  if (validated.length === 0) {
-    throw new Error("OpenAI's response didn't contain any usable posts — try Generate Week again.");
-  }
-
-  return validated;
+  return validateAndFilter(parsed.posts, "generateWeekPlan");
 }
 
 /**
@@ -151,13 +178,7 @@ export async function generatePostsFromDeal(deal: Deal): Promise<GeneratedPost[]
     throw new Error(`OpenAI response had no "posts" array: ${raw.slice(0, 500)}`);
   }
 
-  const validated = parsed.posts.map(validateGeneratedPost).filter((p): p is GeneratedPost => p !== null);
-
-  if (validated.length === 0) {
-    throw new Error("OpenAI's response didn't contain any usable posts for this deal.");
-  }
-
-  return validated;
+  return validateAndFilter(parsed.posts, "generatePostsFromDeal");
 }
 
 export interface ReportResult {
